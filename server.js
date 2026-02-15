@@ -41,13 +41,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// Routes
-app.post('/incoming-call', handleIncomingCall);
+// Routes — health check FIRST so Railway can reach it immediately
 app.get('/health', healthCheck);
+app.get('/', healthCheck);
+app.post('/incoming-call', handleIncomingCall);
 
-// WebSocket server for Media Streams
-const server = app.listen(port, () => {
-  console.log(`🍩 Glazed and Confused server running on port ${port}`);
+// WebSocket server for Media Streams — bind to 0.0.0.0 so Railway can reach it
+const server = app.listen(port, '0.0.0.0', () => {
+  console.log(`🍩 Glazed and Confused server running on port ${port} (0.0.0.0)`);
   console.log(`📞 Incoming call webhook: POST /incoming-call`);
   console.log(`📡 Media stream WebSocket: /media-stream`);
   console.log(`❤️  Health check: GET /health`);

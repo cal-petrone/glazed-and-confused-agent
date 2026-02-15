@@ -9,8 +9,7 @@ function validateEnv() {
     'TWILIO_ACCOUNT_SID',
     'TWILIO_AUTH_TOKEN',
     'OPENAI_API_KEY',
-    'ZAPIER_WEBHOOK_URL',
-    'PORT'
+    'ZAPIER_WEBHOOK_URL'
   ];
   
   const optional = [
