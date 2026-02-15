@@ -106,8 +106,8 @@ IMPORTANT: Finish complete sentences. Don't cut off mid-sentence.`;
         modalities: ['text', 'audio'],
         instructions: instructions,
         voice: 'alloy',
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
+        input_audio_format: 'g711_ulaw',
+        output_audio_format: 'g711_ulaw',
         input_audio_transcription: {
           model: 'whisper-1'
         },
@@ -239,6 +239,16 @@ IMPORTANT: Finish complete sentences. Don't cut off mid-sentence.`;
     
     this.client.send(JSON.stringify(sessionUpdate));
     console.log('✓ OpenAI session configured');
+
+    // Trigger the initial greeting — tell the AI to start speaking
+    this.client.send(JSON.stringify({
+      type: 'response.create',
+      response: {
+        modalities: ['text', 'audio'],
+        instructions: 'Greet the customer warmly. Say: "Thanks for calling Glazed and Confused! What can I get for you today?"'
+      }
+    }));
+    console.log('✓ Initial greeting triggered');
   }
   
   /**
@@ -260,15 +270,26 @@ IMPORTANT: Finish complete sentences. Don't cut off mid-sentence.`;
           console.log('✓ OpenAI session updated');
           break;
           
-        case 'response.audio_transcript.delta':
-          // AI is speaking - send audio to Twilio
+        case 'response.audio.delta':
+          // Actual audio data from OpenAI — forward to Twilio
           if (message.delta && this.onAudioCallback) {
             this.onAudioCallback(message.delta);
           }
           break;
+
+        case 'response.audio.done':
+          console.log('✓ AI audio response complete');
+          break;
+
+        case 'response.audio_transcript.delta':
+          // Text transcript of what the AI is saying (for logging)
+          break;
           
         case 'response.audio_transcript.done':
-          console.log('✓ AI response complete');
+          // Log the full transcript of the AI's response
+          if (message.transcript) {
+            console.log(`🤖 AI said: "${message.transcript}"`);
+          }
           break;
           
         case 'conversation.item.input_audio_transcription.completed':
