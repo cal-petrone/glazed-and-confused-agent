@@ -15,10 +15,10 @@ function handleIncomingCall(req, res) {
     
     console.log(`📞 Incoming call: ${fromNumber} -> ${calledNumber} (CallSid: ${callSid})`);
     
-    // Get base URL for WebSocket endpoint
-    const protocol = req.protocol || 'https';
-    const host = req.get('host') || process.env.NGROK_URL?.replace(/^https?:\/\//, '') || 'localhost:3000';
-    const wsUrl = `${protocol}://${host}/media-stream`;
+    // Build the WebSocket URL for Twilio Media Streams
+    // Twilio requires wss:// (not https://) for the Stream URL
+    const host = req.get('host') || process.env.SERVER_URL?.replace(/^https?:\/\//, '') || 'localhost:3000';
+    const wsUrl = `wss://${host}/media-stream`;
     
     // Create TwiML response
     const twiml = new twilio.twiml.VoiceResponse();
