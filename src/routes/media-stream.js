@@ -1,175 +1,188 @@
 /**
  * Media Stream Route
- * Handles WebSocket connection from Twilio Media Streams
- * for Glazed and Confused donut shop
+ * Handles WebSocket connections from Twilio Media Streams.
+ * Each call gets its own OpenAI session and OrderManager.
+ * On call end, logs the order to Google Sheets.
  */
 
 const WebSocket = require('ws');
 const OrderManager = require('../services/order-manager');
 const OpenAIService = require('../services/openai-service');
-const Logger = require('../services/logger');
 
-function setupMediaStream(wss, logger) {
+function setupMediaStream(wss, logger, sheetsLogger) {
   wss.on('connection', (ws, req) => {
-    console.log('📡 Twilio Media Stream WebSocket connection received');
-    
+    console.log('═══════════════════════════════════════════════════');
+    console.log('📡 NEW CALL — Twilio Media Stream connected');
+    console.log('═══════════════════════════════════════════════════');
+
     let streamSid = null;
     let callSid = null;
     let fromNumber = null;
     let orderManager = null;
     let openaiService = null;
-    let audioBuffer = [];
-    let audioBufferTimer = null;
-    
-    // Extract stream identifier from URL query params
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const streamName = url.searchParams.get('name') || url.pathname.split('/').pop();
-    callSid = streamName; // Use as callSid
-    
+    let audioChunksFromTwilio = 0;
+
     ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
-        
+
         switch (message.event) {
-          case 'start':
-            // Stream started
+          case 'start': {
             streamSid = message.start.streamSid;
-            callSid = message.start.callSid || callSid;
-            fromNumber = message.start.customParameters?.from || message.start.from || 'unknown';
-            
-            console.log(`✓ Stream started: ${streamSid} (CallSid: ${callSid}, From: ${fromNumber})`);
-            
-            // Initialize order manager
+            callSid = message.start.callSid;
+            fromNumber = message.start.customParameters?.from || 'unknown';
+
+            console.log(`📞 Stream started`);
+            console.log(`   StreamSid: ${streamSid}`);
+            console.log(`   CallSid:   ${callSid}`);
+            console.log(`   From:      ${fromNumber}`);
+
+            // Initialize order manager for this call
             orderManager = new OrderManager(streamSid, callSid, fromNumber);
-            
+
             // Initialize OpenAI service
             openaiService = new OpenAIService(
               process.env.OPENAI_API_KEY,
               orderManager,
-              // onAudioCallback - send audio to Twilio
+              // onAudio — send AI's audio back to Twilio
               (audioBase64) => {
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({
                     event: 'media',
                     streamSid: streamSid,
-                    media: {
-                      payload: audioBase64
-                    }
+                    media: { payload: audioBase64 }
                   }));
                 }
               },
-              // onTranscriptCallback - handle user speech
+              // onTranscript — user speech transcribed
               (transcript) => {
-                console.log(`👤 User said: ${transcript}`);
+                console.log(`👤 Transcript: "${transcript}"`);
               }
             );
-            
+
             // Connect to OpenAI
-            openaiService.connect().catch(error => {
-              console.error('Error connecting to OpenAI:', error);
+            openaiService.connect().then(() => {
+              console.log('✅ OpenAI connected — waiting for customer to speak');
+            }).catch(error => {
+              console.error('❌ Failed to connect to OpenAI:', error.message);
             });
-            
+
             break;
-            
-          case 'media':
-            // Audio data from Twilio
-            if (message.media && message.media.payload) {
-              const audioPayload = message.media.payload;
-              
-              // Buffer audio and send in chunks to OpenAI
-              audioBuffer.push(audioPayload);
-              
-              // Send buffered audio every 100ms
-              if (!audioBufferTimer) {
-                audioBufferTimer = setInterval(() => {
-                  if (audioBuffer.length > 0 && openaiService && openaiService.isReady()) {
-                    const combinedAudio = audioBuffer.join('');
-                    openaiService.sendAudio(combinedAudio);
-                    audioBuffer = [];
-                  }
-                }, 100);
+          }
+
+          case 'media': {
+            // Forward each audio chunk directly to OpenAI (no buffering)
+            if (message.media?.payload && openaiService?.isReady()) {
+              openaiService.sendAudio(message.media.payload);
+              audioChunksFromTwilio++;
+
+              // Log periodically to confirm audio is flowing
+              if (audioChunksFromTwilio === 1) {
+                console.log('🎤 First audio chunk received from Twilio');
+              } else if (audioChunksFromTwilio === 50) {
+                console.log('🎤 50 audio chunks received — audio stream flowing normally');
+              } else if (audioChunksFromTwilio % 500 === 0) {
+                console.log(`🎤 ${audioChunksFromTwilio} audio chunks received`);
               }
             }
             break;
-            
-          case 'stop':
-            // Stream stopped
-            console.log(`Stream stopped: ${streamSid}`);
-            
-            // Clean up
-            if (audioBufferTimer) {
-              clearTimeout(audioBufferTimer);
-              audioBufferTimer = null;
-            }
-            
-            // Send any remaining buffered audio
-            if (audioBuffer.length > 0 && openaiService && openaiService.isReady()) {
-              const combinedAudio = audioBuffer.join('');
-              openaiService.sendAudio(combinedAudio);
-              audioBuffer = [];
-            }
-            
-            // Close OpenAI connection
-            if (openaiService) {
-              openaiService.close();
-            }
-            
-            // Log order if ready
-            if (orderManager && orderManager.isReadyToLog()) {
-              const orderData = orderManager.getOrderForLogging();
-              logger.logOrder(orderData).then(result => {
-                if (result.success) {
-                  orderManager.markAsLogged();
-                  console.log('✓ Order logged successfully');
-                } else {
-                  console.error('✗ Failed to log order after retries');
-                }
-              }).catch(error => {
-                console.error('Error logging order:', error);
-              });
-            }
-            
+          }
+
+          case 'stop': {
+            console.log(`📞 Stream stopped: ${streamSid}`);
+            _handleCallEnd('stop');
+            break;
+          }
+
+          case 'mark': {
+            // Twilio mark events — ignore
+            break;
+          }
+
+          default:
+            console.log(`📡 Unknown Twilio event: ${message.event}`);
             break;
         }
       } catch (error) {
-        // Message might be binary or malformed
-        console.error('Error processing Twilio message:', error);
+        console.error('❌ Error processing Twilio message:', error.message);
       }
     });
-    
+
     ws.on('close', () => {
-      console.log('Twilio WebSocket closed - cleaning up...');
-      
-      // Clear audio buffer timer
-      if (audioBufferTimer) {
-        clearTimeout(audioBufferTimer);
-        audioBufferTimer = null;
-      }
-      
-      // Close OpenAI connection
+      console.log('📞 Twilio WebSocket closed');
+      _handleCallEnd('close');
+    });
+
+    ws.on('error', (error) => {
+      console.error('❌ Twilio WebSocket error:', error.message);
+    });
+
+    /**
+     * Handle call ending (from stop event or WebSocket close)
+     */
+    function _handleCallEnd(reason) {
+      console.log(`═══════════════════════════════════════════════════`);
+      console.log(`📞 CALL ENDED (${reason}) — ${audioChunksFromTwilio} audio chunks processed`);
+
+      // Close OpenAI
       if (openaiService) {
         openaiService.close();
+        openaiService = null;
       }
-      
-      // Log order if ready (fallback)
-      if (orderManager && orderManager.isReadyToLog() && !orderManager.getOrder().logged) {
-        const orderData = orderManager.getOrderForLogging();
-        logger.logOrder(orderData).then(result => {
-          if (result.success) {
-            orderManager.markAsLogged();
-            console.log('✓ Order logged successfully (on close)');
+
+      // Log the order
+      if (orderManager) {
+        const order = orderManager.getOrder();
+        console.log(`📋 Order state at call end:`);
+        console.log(`   Items:    ${order.items.length} items`);
+        console.log(`   Name:     ${order.customerName || 'not set'}`);
+        console.log(`   Method:   ${order.deliveryMethod || 'not set'}`);
+        console.log(`   Confirmed: ${order.confirmed}`);
+        console.log(`   Total:    $${order.total.toFixed(2)}`);
+
+        if (order.items.length > 0) {
+          order.items.forEach((item, i) => {
+            console.log(`   Item ${i + 1}: ${item.quantity}x ${item.size} ${item.name} @ $${item.price}`);
+          });
+        }
+
+        // Log to Google Sheets (even if not fully confirmed — captures partial orders)
+        if (order.items.length > 0 && !order.logged) {
+          const orderData = orderManager.getOrderForLogging();
+
+          // Log to Zapier
+          if (logger) {
+            logger.logOrder(orderData).then(result => {
+              if (result.success) {
+                console.log('✅ Order logged to Zapier');
+              } else {
+                console.log('⚠️  Zapier log failed:', result.error);
+              }
+            }).catch(err => console.error('❌ Zapier error:', err.message));
           }
-        }).catch(error => {
-          console.error('Error logging order on close:', error);
-        });
+
+          // Log to Google Sheets Call Log
+          if (sheetsLogger) {
+            sheetsLogger(orderData).then(success => {
+              if (success) {
+                console.log('✅ Order logged to Google Sheets');
+                orderManager.markAsLogged();
+              } else {
+                console.log('⚠️  Google Sheets log failed');
+              }
+            }).catch(err => console.error('❌ Google Sheets error:', err.message));
+          }
+        } else if (order.items.length === 0) {
+          console.log('ℹ️  No items in order — skipping log');
+        } else if (order.logged) {
+          console.log('ℹ️  Order already logged — skipping');
+        }
+
+        orderManager = null;
       }
-      
-      console.log('✓ Cleanup complete');
-    });
-    
-    ws.on('error', (error) => {
-      console.error('Twilio WebSocket error:', error);
-    });
+
+      console.log(`═══════════════════════════════════════════════════`);
+    }
   });
 }
 

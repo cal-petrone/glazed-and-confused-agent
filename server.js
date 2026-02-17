@@ -1,8 +1,8 @@
 /**
  * Real-Time AI Donut Ordering Assistant — Glazed and Confused
  * Production-ready server with modular architecture
- * 
- * Twilio Media Streams + OpenAI Realtime API
+ *
+ * Twilio Media Streams + OpenAI Realtime API + Google Sheets
  */
 
 require('dotenv').config();
@@ -10,38 +10,38 @@ require('dotenv').config();
 const express = require('express');
 const WebSocket = require('ws');
 
-// ── Try to load all modules up front ──
-let handleIncomingCall, setupMediaStream, Logger, validateEnv, sanitizeForLog;
+// ── Load modules ──
+let handleIncomingCall, setupMediaStream, Logger, validateEnv;
+let googleSheets, menuConfig;
 let initError = null;
 
 try {
-  ({ validateEnv, sanitizeForLog } = require('./src/utils/validation'));
+  ({ validateEnv } = require('./src/utils/validation'));
   handleIncomingCall = require('./src/routes/incoming-call');
   setupMediaStream = require('./src/routes/media-stream');
   Logger = require('./src/services/logger');
+  googleSheets = require('./integrations/google-sheets');
+  menuConfig = require('./src/config/menu');
 } catch (err) {
   initError = err;
-  console.error('❌ Failed to load modules:', err.message);
+  console.error('❌ Failed to load modules:', err.message, err.stack);
 }
 
-// ── Validate environment (warn but don't crash) ──
+// ── Validate environment ──
 if (validateEnv) {
   try {
     validateEnv();
   } catch (envError) {
     console.error('⚠️  Environment validation warning:', envError.message);
-    console.error('⚠️  Server will start but some features may not work.');
   }
 }
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ── Middleware — registered BEFORE routes ──
+// ── Middleware ──
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-
-// Request logging (skip health checks to reduce noise)
 app.use((req, res, next) => {
   if (req.path !== '/health' && req.path !== '/') {
     console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
@@ -49,52 +49,47 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Routes ──
-
-// Health check — always available
+// ── Health check ──
 app.get('/health', (_req, res) => {
   res.status(200).json({
     status: 'ok',
     service: 'glazed-and-confused',
     initialized: !initError,
+    sheetsReady: googleSheets?.isSheetsReady() || false,
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
 });
-
 app.get('/', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'glazed-and-confused' });
 });
 
-// Incoming call webhook — the critical route Twilio hits
+// ── Incoming call webhook ──
 if (handleIncomingCall) {
   app.post('/incoming-call', handleIncomingCall);
-  console.log('✅ POST /incoming-call route registered');
+  console.log('✅ POST /incoming-call registered');
 } else {
-  // Fallback: return valid TwiML even if the module failed to load
   app.post('/incoming-call', (_req, res) => {
-    console.error('❌ /incoming-call hit but module not loaded. Init error:', initError?.message);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response><Say>We are sorry, our ordering system is temporarily unavailable. Please try again later.</Say></Response>`;
     res.type('text/xml').send(twiml);
   });
-  console.error('⚠️  POST /incoming-call registered with FALLBACK handler (module load failed)');
+  console.error('⚠️  /incoming-call using FALLBACK handler');
 }
 
-// ── Start HTTP server — bind to 0.0.0.0 for Railway ──
+// ── Start HTTP server ──
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`🍩 Glazed and Confused server listening on 0.0.0.0:${port}`);
-  console.log(`❤️  Health check: GET /health`);
-  console.log(`📞 Incoming call: POST /incoming-call`);
-  console.log(`📡 Media stream: WS /media-stream`);
+
+  // Initialize Google Sheets and menu AFTER the server is listening
+  initializeServices();
 });
 
-// ── WebSocket server for Twilio Media Streams ──
+// ── WebSocket for Twilio Media Streams ──
 const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
-
   if (pathname === '/media-stream') {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -104,42 +99,69 @@ server.on('upgrade', (request, socket, head) => {
   }
 });
 
-// ── Initialize logger and media stream handler ──
-if (setupMediaStream && Logger) {
-  const logger = new Logger(
-    process.env.ZAPIER_WEBHOOK_URL,
-    3,    // max retries
-    1000  // initial retry delay (ms)
-  );
-  setupMediaStream(wss, logger);
-  console.log('✅ Media stream handler initialized');
-} else {
-  console.error('⚠️  Media stream handler NOT initialized (module load failed)');
+// ── Initialize services ──
+async function initializeServices() {
+  // 1. Initialize Google Sheets
+  let sheetsLogFn = null;
+  if (googleSheets) {
+    try {
+      const sheetsOk = await googleSheets.initializeGoogleSheets();
+      if (sheetsOk) {
+        // 2. Load menu from the Menu sheet
+        const menuData = await googleSheets.fetchMenuFromSheet();
+        if (menuData && menuConfig) {
+          menuConfig.setDynamicMenu(menuData);
+          console.log('✅ Dynamic menu loaded from Google Sheets');
+        } else {
+          console.log('⚠️  Using hardcoded fallback menu');
+        }
+
+        // Prepare the Sheets logging function for media-stream
+        sheetsLogFn = googleSheets.logOrderToCallLog;
+      } else {
+        console.log('⚠️  Google Sheets not initialized — using fallback menu, no order logging');
+      }
+    } catch (error) {
+      console.error('❌ Error initializing Google Sheets:', error.message);
+    }
+  }
+
+  // 3. Initialize logger and media stream
+  if (setupMediaStream && Logger) {
+    const logger = new Logger(process.env.ZAPIER_WEBHOOK_URL, 3, 1000);
+    setupMediaStream(wss, logger, sheetsLogFn);
+    console.log('✅ Media stream handler initialized');
+  } else {
+    console.error('⚠️  Media stream NOT initialized');
+  }
+
+  console.log('');
+  console.log('═══════════════════════════════════════════════════');
+  console.log('🍩 Glazed and Confused is READY');
+  console.log('   Health:   GET  /health');
+  console.log('   Webhook:  POST /incoming-call');
+  console.log('   Stream:   WS   /media-stream');
+  console.log('═══════════════════════════════════════════════════');
+  console.log('');
 }
 
 // ── Periodic health log ──
 setInterval(() => {
-  console.log(`📊 Server health — ${new Date().toISOString()} — uptime: ${Math.floor(process.uptime())}s`);
+  console.log(`📊 Heartbeat — ${new Date().toISOString()} — uptime: ${Math.floor(process.uptime())}s`);
 }, 300000);
-
-console.log('✅ Glazed and Confused server fully started');
 
 // ── Graceful shutdown ──
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully...');
+  console.log('SIGTERM received, shutting down...');
   server.close(() => process.exit(0));
 });
-
 process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully...');
+  console.log('SIGINT received, shutting down...');
   server.close(() => process.exit(0));
 });
-
-// ── Catch unhandled errors to prevent container crashes ──
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught exception:', error);
 });
-
 process.on('unhandledRejection', (reason) => {
-  console.error('❌ Unhandled promise rejection:', reason);
+  console.error('❌ Unhandled rejection:', reason);
 });
