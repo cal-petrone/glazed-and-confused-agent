@@ -11,26 +11,25 @@ function handleIncomingCall(req, res) {
   try {
     const calledNumber = req.body.Called || req.body.To;
     const callSid = req.body.CallSid;
-    const fromNumber = req.body.From;
+    const fromNumber = req.body.From || 'unknown';
     
     console.log(`📞 Incoming call: ${fromNumber} -> ${calledNumber} (CallSid: ${callSid})`);
     
-    // Build the WebSocket URL for Twilio Media Streams
-    // Twilio requires wss:// (not https://) for the Stream URL
     const host = req.get('host') || process.env.SERVER_URL?.replace(/^https?:\/\//, '') || 'localhost:3000';
     const wsUrl = `wss://${host}/media-stream`;
     
-    // Create TwiML response
     const twiml = new twilio.twiml.VoiceResponse();
-    
-    // Connect to Media Stream
     const connect = twiml.connect();
     const stream = connect.stream({
       url: wsUrl,
-      name: callSid // Use CallSid as stream identifier
+      name: callSid
     });
+
+    // Pass the caller's phone number to the media stream handler
+    stream.parameter({ name: 'callerPhone', value: fromNumber });
+    stream.parameter({ name: 'callSid', value: callSid });
     
-    console.log(`✓ TwiML generated, connecting to: ${wsUrl}`);
+    console.log(`✓ TwiML generated, connecting to: ${wsUrl} (from: ${fromNumber})`);
     
     res.type('text/xml');
     res.send(twiml.toString());

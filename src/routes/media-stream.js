@@ -29,13 +29,14 @@ function setupMediaStream(wss, logger, sheetsLogger) {
         switch (message.event) {
           case 'start': {
             streamSid = message.start.streamSid;
-            callSid = message.start.callSid;
-            fromNumber = message.start.customParameters?.from || 'unknown';
+            callSid = message.start.callSid || message.start.customParameters?.callSid;
+            fromNumber = message.start.customParameters?.callerPhone || 'unknown';
 
             console.log(`📞 Stream started`);
             console.log(`   StreamSid: ${streamSid}`);
             console.log(`   CallSid:   ${callSid}`);
-            console.log(`   From:      ${fromNumber}`);
+            console.log(`   Caller:    ${fromNumber}`);
+            console.log(`   Params:    ${JSON.stringify(message.start.customParameters || {})}`);
 
             // Initialize order manager for this call
             orderManager = new OrderManager(streamSid, callSid, fromNumber);
